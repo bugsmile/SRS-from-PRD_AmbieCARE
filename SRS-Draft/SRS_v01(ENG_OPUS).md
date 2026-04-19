@@ -353,6 +353,217 @@ graph TB
     UC9 --> S
 ```
 
+### 3.6 Entity-Relationship Diagram (ERD)
+
+```mermaid
+erDiagram
+    SensorDevice ||--o{ WellnessEvent : "generates"
+    SensorDevice ||--o{ DailyReport : "produces"
+    UserAccount ||--o{ SensorDevice : "linked_devices"
+    UserAccount }o--o| Facility : "belongs_to"
+    SensorDevice }o--o| Facility : "installed_at"
+
+    SensorDevice {
+        UUID device_id PK
+        ENUM location_zone
+        VARCHAR firmware_version
+        DATETIME installation_date
+        ENUM status
+        ENUM calibration_status
+        DATETIME last_heartbeat_at
+        UUID facility_id FK
+    }
+
+    WellnessEvent {
+        UUID event_id PK
+        UUID device_id FK
+        ENUM event_type
+        DATETIME timestamp
+        FLOAT confidence_score
+        BOOLEAN is_false_alarm
+        ENUM zone
+        VARCHAR integrity_hash
+    }
+
+    UserAccount {
+        UUID user_id PK
+        ENUM role
+        UUID_ARRAY linked_devices
+        JSON notification_pref
+        UUID facility_id FK
+    }
+
+    DailyReport {
+        UUID report_id PK
+        UUID device_id FK
+        DATE date
+        INT sleep_score
+        INT bathroom_visit_count
+        VARCHAR_ARRAY anomaly_flags
+        ENUM status_code
+        DATETIME generated_at
+    }
+
+    Facility {
+        UUID facility_id PK
+        VARCHAR name
+        VARCHAR address
+        VARCHAR emr_webhook_url
+    }
+```
+
+### 3.7 Class Diagram
+
+```mermaid
+classDiagram
+    class EdgeAIValidator {
+        -model: DeepLearningModel
+        -threshold: float
+        +analyzeWaveform(rawData: RadarWaveform): InferenceResult
+        +classifyEvent(score: float): EventType
+        +deIdentify(rawData: RadarWaveform): Metadata
+        +detectPet(bodyPattern: BodySignature): boolean
+    }
+
+    class CloudBackend {
+        -eventDB: EventDatabase
+        -pushService: PushNotificationService
+        +ingestEvent(event: WellnessEvent): void
+        +triggerEmergencyPush(event: WellnessEvent): void
+        +sendEMRWebhook(event: WellnessEvent): WebhookResult
+        +monitorHeartbeats(): void
+    }
+
+    class ReportPipeline {
+        -outlierThreshold: int
+        -dwellMinimumHours: int
+        +aggregateDailyData(deviceId: UUID, date: Date): RawMetrics
+        +calculateSleepScore(metrics: RawMetrics): int
+        +detectAnomalies(metrics: RawMetrics): AnomalyFlag[]
+        +generateReport(deviceId: UUID, date: Date): DailyReport
+    }
+
+    class PushNotificationService {
+        -fcmKey: string
+        -apnsKey: string
+        +sendEmergencyAlert(userId: UUID, event: WellnessEvent): void
+        +sendDailyReport(userId: UUID, report: DailyReport): void
+        +sendOfflineAlert(userId: UUID, device: SensorDevice): void
+    }
+
+    class EMRWebhookClient {
+        -apiKey: string
+        -hmacSecret: string
+        -maxRetries: int
+        +postEvent(event: WellnessEvent): HttpResponse
+        +retryWithBackoff(event: WellnessEvent, attempt: int): HttpResponse
+        +enqueueDeadLetter(event: WellnessEvent): void
+    }
+
+    class TriageEngine {
+        +calculateRiskScore(events: WellnessEvent[]): RankedList
+        +sortByPriority(events: WellnessEvent[]): WellnessEvent[]
+        +highlightTopCase(event: WellnessEvent): void
+    }
+
+    class OTAService {
+        -firmwareRepo: FirmwareRepository
+        +deployFirmware(deviceIds: UUID[], firmware: Binary): DeployReport
+        +verifyIntegrity(firmware: Binary): boolean
+        +rollback(deviceId: UUID): void
+    }
+
+    class HeartbeatMonitor {
+        -missThreshold: int
+        -offlineRatioAlert: float
+        +trackHeartbeat(deviceId: UUID): void
+        +detectOffline(deviceId: UUID): boolean
+        +calculateOfflineRatio(): float
+        +escalateToPagerDuty(ratio: float): void
+    }
+
+    EdgeAIValidator --> CloudBackend : sends de-identified events
+    CloudBackend --> PushNotificationService : delegates push
+    CloudBackend --> EMRWebhookClient : delegates EMR sync
+    CloudBackend --> TriageEngine : delegates triage
+    CloudBackend --> HeartbeatMonitor : monitors devices
+    ReportPipeline --> CloudBackend : queries & saves reports
+    OTAService --> EdgeAIValidator : updates firmware
+```
+
+### 3.8 Component Diagram
+
+```mermaid
+graph TB
+    subgraph "Edge Layer"
+        RADAR["UWB Radar Module"]
+        EDGE["Edge AI Validator\n(Deep Learning Inference)"]
+        RADAR --> EDGE
+    end
+
+    subgraph "Cloud Layer"
+        INGEST["Event Ingest Service\n(POST /api/v1/events/ingest)"]
+        EVENTDB[("Event Database\n(WellnessEvent + Hash Chain)")]
+        DEVICEDB[("Device Database\n(SensorDevice)")]
+        REPORTDB[("Report Database\n(DailyReport)")]
+        PIPELINE["Report Pipeline\n(Daily Aggregation)"]
+        HEARTBEAT["Heartbeat Monitor\n(Device Health)"]
+        WEBHOOK["EMR Webhook Client\n(HMAC-SHA256)"]
+        TRIAGE["Triage Engine\n(Risk Scoring)"]
+        PUSH["Push Notification Service"]
+        OTA["OTA Service\n(Firmware Deployment)"]
+        ARCHIVE["Archive Service\n(S3 Hot → Glacier Cold)"]
+        DLQ["Dead Letter Queue\n(Failed EMR Events)"]
+    end
+
+    subgraph "External Services"
+        FCM["Firebase Cloud Messaging"]
+        APNS["Apple Push Notification"]
+        EMRSYS["EMR System\n(Carefor Webhook)"]
+        AMPLITUDE["Amplitude / Mixpanel\n(Product Analytics)"]
+        PAGERDUTY["PagerDuty\n(Ops Escalation)"]
+        AWS["AWS Infrastructure\n(Lambda, S3, CloudWatch)"]
+    end
+
+    subgraph "Client Applications"
+        GUARDIAN["B2C Guardian App\n(iOS)"]
+        DASHBOARD["B2B Monitoring Dashboard\n(Web SPA)"]
+        INSTALLER["Installer App\n(Internal Mobile)"]
+    end
+
+    EDGE -->|"TLS 1.3\nDe-identified Metadata"| INGEST
+    INGEST --> EVENTDB
+    INGEST --> TRIAGE
+    INGEST --> PUSH
+    INGEST --> WEBHOOK
+
+    PIPELINE --> EVENTDB
+    PIPELINE --> REPORTDB
+    PIPELINE --> PUSH
+
+    HEARTBEAT --> DEVICEDB
+    HEARTBEAT --> PUSH
+    HEARTBEAT -->|"Offline ≥3%"| PAGERDUTY
+
+    WEBHOOK -->|"HTTP POST\nAPI Key + HMAC"| EMRSYS
+    WEBHOOK -->|"Failed 3x"| DLQ
+
+    PUSH --> FCM
+    PUSH --> APNS
+    FCM --> GUARDIAN
+    APNS --> GUARDIAN
+
+    TRIAGE --> DASHBOARD
+    INGEST -->|"WebSocket"| DASHBOARD
+
+    OTA -->|"Firmware Binary"| EDGE
+    ARCHIVE --> AWS
+
+    GUARDIAN -->|"False Alarm Feedback"| INGEST
+    GUARDIAN --> AMPLITUDE
+    DASHBOARD -->|"Archive Query\nJWT+RBAC"| ARCHIVE
+```
+
 ---
 
 ## 4. Specific Requirements
@@ -505,33 +716,49 @@ graph TB
 
 | PRD Source (Story / FR / NFR) | Requirement ID | Requirement Type | Test Case ID | Test Case Summary |
 | :--- | :--- | :--- | :--- | :--- |
+| Story 1, FR-01 | REQ-FUNC-001 | Functional | TC-FUNC-018 | Inject various radar waveforms and verify Edge AI Validator classifies events correctly with appropriate confidence_score and event_type. |
 | Story 1 (AC-1.1), FR-01 | REQ-FUNC-002 | Functional | TC-FUNC-001 | Verify absent flags when injecting blanket movement. Track 30d values ≤ 0.3. |
 | Story 1 (AC-1.4), FR-01 | REQ-FUNC-003 | Functional | TC-FUNC-002 | Simulate ≤ 10kg objects traversing boundary. Note accuracy rates exceeding 99% logic mapping. |
 | Story 1 (AC-1.3), FR-01 | REQ-FUNC-004 | Functional | TC-FUNC-003 | Run actual fall tests recording push duration consistently measuring under limits. |
+| Story 1, §1.3 | REQ-FUNC-005 | Functional | TC-FUNC-006 | Run mock alert feedback via UI tests mapping `is_false_alarm` markers correctly. |
 | Story 1 (AC-1.2), FR-02 | REQ-FUNC-006 | Functional | TC-FUNC-004 | Note device operational parameters during constant weekly bounds tracking friction limits at exactly nil. |
+| FR-02, NFR-11 | REQ-FUNC-007 | Functional | TC-FUNC-019 | Deploy a new sensor and verify automated calibration completes successfully, logging status as `calibrated`. |
 | Story 1 (AC-1.5), FR-02 | REQ-FUNC-008 | Functional | TC-FUNC-005 | Execute hard severing logic. Mark precise time mapping arrival of single disconnect pings. |
-| Story 1, FR-01 | REQ-FUNC-005 | Functional | TC-FUNC-006 | Run mock alert feedback via UI tests mapping `is_false_alarm` markers correctly. |
-| Story 2 (AC-2.1), FR-05 | REQ-FUNC-016 | Functional | TC-FUNC-007 | Cross reference ground-truth papers tracking actual bathroom values confirming 90%+ similarity. |
-| Story 2 (AC-2.2), FR-05 | REQ-FUNC-017 | Functional | TC-FUNC-008 | Program anomaly values surpassing strict values triggering immediate notification logic. |
-| Story 2 (AC-2.4), FR-05 | REQ-FUNC-018 | Functional | TC-FUNC-009 | Ensure specific absence yields exact "Insufficient dwell data" notifications avoiding blank error states. |
-| Story 2 (AC-2.5), FR-05 | REQ-FUNC-019 | Functional | TC-FUNC-010 | Trigger false machine positives confirming precise display values alongside warning flags efficiently. |
+| FR-03, §1.4 KSF #2 | REQ-FUNC-009 | Functional | TC-FUNC-020 | Verify indoor path tracking records dwell times across zones using non-video sensors with 100% privacy compliance. |
+| FR-03, CON-02 | REQ-FUNC-010 | Functional | TC-FUNC-021 | Confirm Edge device converts raw radar waveforms to numerical statistics locally; verify no raw data is transmitted to Cloud. |
+| Story 3, FR-04 | REQ-FUNC-011 | Functional | TC-FUNC-022 | Verify dashboard displays color-coded bed nodes and updates status via WebSocket events. |
 | Story 3 (AC-3.5), FR-04 | REQ-FUNC-012 | Functional | TC-FUNC-011 | Overload backend arrays parsing multiple events confirming prioritization arrays automatically display top marks. |
 | Story 3 (AC-3.2), FR-04 | REQ-FUNC-013 | Functional | TC-FUNC-012 | Confirm standard Webhook pings against manual check counts ensuring parallel operations seamlessly map. |
 | Story 3 (AC-3.4), FR-04 | REQ-FUNC-014 | Functional | TC-FUNC-013 | Simulate server connection failures noting retry configurations executing correctly before failing. |
 | Story 3 (AC-3.3), FR-04 | REQ-FUNC-015 | Functional | TC-FUNC-014 | Scan values approaching timeline borders tracking successful archive queries and exact migrations. |
+| Story 2 (AC-2.1), FR-05 | REQ-FUNC-016 | Functional | TC-FUNC-007 | Cross reference ground-truth papers tracking actual bathroom values confirming 90%+ similarity. |
+| Story 2 (AC-2.2), FR-05 | REQ-FUNC-017 | Functional | TC-FUNC-008 | Program anomaly values surpassing strict values triggering immediate notification logic. |
+| Story 2 (AC-2.4), FR-05 | REQ-FUNC-018 | Functional | TC-FUNC-009 | Ensure specific absence yields exact "Insufficient dwell data" notifications avoiding blank error states. |
+| Story 2 (AC-2.5), FR-05 | REQ-FUNC-019 | Functional | TC-FUNC-010 | Trigger false machine positives confirming precise display values alongside warning flags efficiently. |
+| FR-05, §2.2.3 | REQ-FUNC-020 | Functional | TC-FUNC-023 | Verify daily report push delivery is scheduled and arrives at 07:30 consistently via FCM/APNs queue. |
 | FR-06 | REQ-FUNC-021 | Functional | TC-FUNC-015 | Render front end panels mapping collected point values onto visual timelines consistently. |
 | FR-07 | REQ-FUNC-022 | Functional | TC-FUNC-016 | Initiate redundant SMS routes mimicking APNs limits checking receipt on dual paths successfully. |
 | FR-08 | REQ-FUNC-023 | Functional | TC-FUNC-017 | Check filtering tools accurately hiding nodes violating conditions perfectly adjusting grid mapping. |
 | NFR-01 | REQ-NF-001 | Non-Functional | TC-NF-001 | Automate 1k tests aggregating p95 limits under exact boundaries measuring effectively. |
 | NFR-02 | REQ-NF-002 | Non-Functional | TC-NF-002 | Query monthly data strings validating performance limits keeping averages far below defined caps. |
-| NFR-04 | REQ-NF-005 | Non-Functional | TC-NF-003 | Retrieve official host platform numbers affirming constant availability matches target numbers continuously. |
+| NFR-03 | REQ-NF-003 | Non-Functional | TC-NF-011 | Compare system-reported sleep scores and bathroom counts against ground-truth data; verify error rate < 10%. |
 | NFR-14 | REQ-NF-004 | Non-Functional | TC-NF-004 | Spawn massive virtual arrays checking maximum transaction limits staying within strict rules effectively. |
+| NFR-04 | REQ-NF-005 | Non-Functional | TC-NF-003 | Retrieve official host platform numbers affirming constant availability matches target numbers continuously. |
+| NFR-05 | REQ-NF-006 | Non-Functional | TC-NF-012 | Measure packet loss rate between Edge and Cloud over sustained test periods; confirm ≤ 0.1% loss. |
+| NFR-13 | REQ-NF-007 | Non-Functional | TC-NF-013 | Simulate >3% sensor offline rate within 1 hour and verify PagerDuty Sev1 alert is triggered automatically. |
 | NFR-06 | REQ-NF-008 | Non-Functional | TC-NF-005 | Run strict packet evaluation reviewing cryptography compliance blocking unprotected layers completely. |
+| NFR-07 | REQ-NF-009 | Non-Functional | TC-NF-014 | Perform quarterly DB scan to verify no personally identifiable markers exist; confirm 0 identifiable records. |
+| §6.2 | REQ-NF-010 | Non-Functional | TC-NF-015 | Verify EMR Webhook endpoint enforces API Key + HMAC-SHA256 authentication; confirm 0 unauthorized access. |
+| §6.2 | REQ-NF-011 | Non-Functional | TC-NF-016 | Test JWT + RBAC enforcement on event archive API; verify unauthorized role access is denied with 403. |
 | NFR-08 | REQ-NF-012 | Non-Functional | TC-NF-006 | Confirm calculated expenditure parameters verifying structural cost boundaries efficiently mapping targets. |
-| NFR-10 | REQ-NF-017 | Non-Functional | TC-NF-007 | Validate archival hash blocks maintaining identical string arrays assuring legal protections remain unbroken. |
+| NFR-09 | REQ-NF-013 | Non-Functional | TC-NF-017 | Execute OTA firmware deployment to test devices; verify deployment success rate ≥ 99% with rollback on failure. |
 | §1.3 | REQ-NF-014 | Non-Functional | TC-NF-008 | Automate reading complaint markers maintaining user thresholds exactly underneath specific count rates. |
 | §1.3 | REQ-NF-015 | Non-Functional | TC-NF-009 | Review active hits checking numbers exceed specific baseline limits targeting positive usage percentages. |
 | §1.3 | REQ-NF-016 | Non-Functional | TC-NF-010 | Aggregate churn parameters verifying lack of discomfort signals registering entirely null. |
+| NFR-10 | REQ-NF-017 | Non-Functional | TC-NF-007 | Validate archival hash blocks maintaining identical string arrays assuring legal protections remain unbroken. |
+| NFR-14 | REQ-NF-018 | Non-Functional | TC-NF-018 | Load test with 5,000 concurrent device streams; verify system scales horizontally without degradation. |
+| NFR-12 | REQ-NF-019 | Non-Functional | TC-NF-019 | Run CI linter against entire codebase; verify 100% of regulatory-trigger words (diagnosis, medical, patient) are caught and blocked from merge. |
+| NFR-11 | REQ-NF-020 | Non-Functional | TC-NF-020 | Deploy sensor using installer app; verify calibration guidance achieves ≥ 95% correct angle placement. |
 
 ---
 
